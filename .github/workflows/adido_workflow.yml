@@ -1,0 +1,59 @@
+name: Sync DEV to SIT
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'adido/**'    # Triggers only when files under adido/ change
+
+jobs:
+  sync-to-sit:
+    name: Sync DEV to SIT
+    runs-on: self-hosted        # Runner installed on VM1
+
+    steps:
+
+      # Step 1: Checkout latest code from GitHub
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # Step 2: Ensure DEV and SIT folders exist
+      - name: Prepare Folders
+        run: |
+          sudo mkdir -p /opt/app01/dev/adido
+          sudo mkdir -p /opt/app01/sit/adido
+          sudo chown -R $USER:$USER /opt/app01/
+          echo "Folders are ready."
+
+      # Step 3: Sync GitHub repo → DEV folder
+      - name: Update DEV Folder
+        run: |
+          rsync -av --delete \
+            $GITHUB_WORKSPACE/adido/ \
+            /opt/app01/dev/adido/
+          echo "DEV folder updated."
+
+      # Step 4: Sync DEV → SIT locally
+      - name: Sync DEV to SIT
+        run: |
+          rsync -av --delete \
+            /opt/app01/dev/adido/ \
+            /opt/app01/sit/adido/
+          echo "Sync complete."
+
+      # Step 5: Verify both folders are in sync
+      - name: Verify Sync
+        run: |
+          echo "====== DEV FOLDER ======"
+          ls -la /opt/app01/dev/adido/
+
+          echo ""
+          echo "====== SIT FOLDER ======"
+          ls -la /opt/app01/sit/adido/
+
+          echo ""
+          echo "====== DIFF CHECK ======"
+          diff -rq /opt/app01/dev/adido/ /opt/app01/sit/adido/ \
+            && echo "SUCCESS: DEV and SIT are in sync!" \
+            || echo "WARNING: Differences found!"
