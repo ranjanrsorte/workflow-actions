@@ -1,0 +1,160 @@
+name: Deploy to DEV and SIT
+
+on:
+  push:
+    branches:
+      - 'feature/**'        # Triggers on push to any feature branch → deploys to DEV
+  pull_request:
+    branches:
+      - dev                 # Triggers when a PR targeting dev branch is merged → deploys to SIT
+    types:
+      - closed
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # JOB 1: Deploy to DEV Remote VM (on push to feature/* branch)
+  # ─────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy to DEV Server
+    # Self-hosted runner registered on the DEV VM with the label "dev-runner".
+    # The runner executes directly on the DEV VM — no SSH hop needed.
+    # Register your runner with: ./config.sh --labels dev-runner
+    runs-on: [self-hosted, dev-runner]
+    if: github.event_name == 'push'   # Only run this job on direct push events
+
+    environment:
+      name: DEV                        # Maps to GitHub Environment named "DEV"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Deploy code on DEV VM via git pull (HTTPS)
+        # Since the runner runs ON the DEV VM itself, we deploy by
+        # pulling code directly into the app directory — no SSH needed.
+        env:
+          GIT_PAT_TOKEN: ${{ secrets.GIT_PAT_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          echo "====== DEV Deployment Started ======"
+          echo "Runner  : $(hostname)"
+          echo "Branch  : $BRANCH"
+          echo "Commit  : ${{ github.sha }}"
+
+          APP_DIR="/opt/app01/app-name/dev/app-name"
+          REPO_URL="https://${GIT_PAT_TOKEN}@github.com/${REPO}.git"
+
+          # ── If the repo does not exist on the server yet, clone it ──
+          if [ ! -d "$APP_DIR/.git" ]; then
+            echo "No existing repo found. Cloning for the first time..."
+            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+          else
+            echo "Repo exists. Pulling latest changes..."
+            cd "$APP_DIR"
+            # Update the remote URL with the latest token (in case it changed)
+            git remote set-url origin "$REPO_URL"
+            git fetch origin
+            git checkout "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+          fi
+
+          echo ""
+          echo "── Restarting Application ──"
+          cd "$APP_DIR"
+
+          # -------------------------------------------
+          # Uncomment and adjust the command for your stack:
+          # Node.js  → npm install && pm2 restart app-name
+          # Python   → pip install -r requirements.txt && systemctl restart app-name
+          # Java     → mvn package -DskipTests && systemctl restart app-name
+          # Generic  → systemctl restart app-name
+          # -------------------------------------------
+          # systemctl restart app-name
+
+          echo "====== DEV Deployment Complete ======"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 2: Wait for Manual Approval before deploying to SIT
+  #         (GitHub Environment protection rule handles the gate)
+  # ─────────────────────────────────────────────────────────────
+  approval-gate:
+    name: Waiting for SIT Approval
+    # Approval-gate is a lightweight job — runs on the DEV runner
+    # (or any available self-hosted runner) just to pause the pipeline.
+    runs-on: [self-hosted, dev-runner]
+    # Only run when a PR targeting 'dev' branch is actually merged (not just closed)
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+
+    environment:
+      name: SIT-Approval              # This environment must have a Required Reviewer set in GitHub
+
+    steps:
+      - name: Approval received — proceeding to SIT deployment
+        run: |
+          echo "Approval granted!"
+          echo "PR       : ${{ github.event.pull_request.title }}"
+          echo "Merged by: ${{ github.event.pull_request.merged_by.login }}"
+          echo "Commit   : ${{ github.sha }}"
+
+  # ─────────────────────────────────────────────────────────────
+  # JOB 3: Deploy to SIT Remote VM (runs only after approval)
+  # ─────────────────────────────────────────────────────────────
+  deploy-sit:
+    name: Deploy to SIT Server
+    # Self-hosted runner registered on the SIT VM with the label "sit-runner".
+    # Register your runner with: ./config.sh --labels sit-runner
+    runs-on: [self-hosted, sit-runner]
+    needs: approval-gate              # Will only run after the approval-gate job completes
+
+    environment:
+      name: SIT                       # Maps to GitHub Environment named "SIT"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: dev                    # Checkout the dev branch (the fully merged state)
+
+      - name: Deploy code on SIT VM via git pull (HTTPS)
+        env:
+          GIT_PAT_TOKEN: ${{ secrets.GIT_PAT_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          echo "====== SIT Deployment Started ======"
+          echo "Runner  : $(hostname)"
+          echo "Branch  : dev"
+          echo "Commit  : ${{ github.sha }}"
+
+          APP_DIR="/opt/app01/app-name/dev/app-name"
+          REPO_URL="https://${GIT_PAT_TOKEN}@github.com/${REPO}.git"
+          BRANCH="dev"
+
+          # ── If the repo does not exist on the server yet, clone it ──
+          if [ ! -d "$APP_DIR/.git" ]; then
+            echo "No existing repo found. Cloning for the first time..."
+            git clone --branch "$BRANCH" "$REPO_URL" "$APP_DIR"
+          else
+            echo "Repo exists. Pulling latest changes..."
+            cd "$APP_DIR"
+            # Update the remote URL with the latest token (in case it changed)
+            git remote set-url origin "$REPO_URL"
+            git fetch origin
+            git checkout "$BRANCH"
+            git reset --hard "origin/$BRANCH"
+          fi
+
+          echo ""
+          echo "── Restarting Application ──"
+          cd "$APP_DIR"
+
+          # -------------------------------------------
+          # Uncomment and adjust the command for your stack:
+          # Node.js  → npm install && pm2 restart app-name
+          # Python   → pip install -r requirements.txt && systemctl restart app-name
+          # Java     → mvn package -DskipTests && systemctl restart app-name
+          # Generic  → systemctl restart app-name
+          # -------------------------------------------
+          # systemctl restart app-name
+
+          echo "====== SIT Deployment Complete ======"
