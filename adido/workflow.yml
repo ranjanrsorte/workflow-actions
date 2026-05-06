@@ -1,0 +1,202 @@
+name: Deploy Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: 'Deploy to specific environment'
+        required: false
+        default: 'dev'
+        type: choice
+        options:
+          - dev
+          - sit
+          - uat
+          - prod
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared variables across all jobs
+# ─────────────────────────────────────────────────────────────────────────────
+env:
+  APP_NAME: your-app-name
+  ARTIFACT_NAME: app-build
+
+jobs:
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 1. BUILD — runs once, artifact reused by all deploy jobs
+  # ───────────────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: [self-hosted, dev]   # build on your DEV RHEL server
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set version from commit SHA
+        id: version
+        run: echo "version=${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
+      - name: Build application
+        run: |
+          echo "Building $APP_NAME version ${{ steps.version.outputs.version }}"
+          # Replace with your actual build command, e.g.:
+          # mvn clean package -DskipTests
+          # npm ci && npm run build
+          # make build
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ steps.version.outputs.version }}
+          path: ./dist/             # adjust to your build output folder
+          retention-days: 7
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 2. DEPLOY TO DEV — automatic on every push to main
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → DEV
+    needs: build
+    runs-on: [self-hosted, dev]
+    environment: dev              # no protection rules on this environment
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ needs.build.outputs.version }}
+          path: ./dist/
+
+      - name: Deploy to DEV
+        run: |
+          echo "Deploying version ${{ needs.build.outputs.version }} to DEV"
+          # Replace with your actual deploy steps, e.g.:
+          # ./scripts/deploy.sh dev ${{ needs.build.outputs.version }}
+          # ansible-playbook -i inventories/dev deploy.yml
+          # systemctl restart your-app
+
+      - name: Smoke test DEV
+        run: |
+          echo "Running smoke tests on DEV"
+          # curl -f http://dev-server/health || exit 1
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 3. DEPLOY TO SIT — requires approval (configured in GitHub Environment settings)
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-sit:
+    name: Deploy → SIT
+    needs: deploy-dev
+    runs-on: [self-hosted, sit]
+    environment: SIT              # ← approval gate configured here in GitHub settings
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ needs.build.outputs.version }}
+          path: ./dist/
+
+      - name: Deploy to SIT
+        run: |
+          echo "Deploying version ${{ needs.build.outputs.version }} to SIT"
+          # ./scripts/deploy.sh sit ${{ needs.build.outputs.version }}
+
+      - name: Run integration tests
+        run: |
+          echo "Running integration tests on SIT"
+          # ./scripts/integration-tests.sh
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "SIT deployment failed — notify team"
+          # curl -X POST ${{ secrets.TEAMS_WEBHOOK }} -d '{"text":"SIT deploy failed"}'
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 4. DEPLOY TO UAT — requires approval after SIT passes
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-uat:
+    name: Deploy → UAT
+    needs: deploy-sit
+    runs-on: [self-hosted, uat]
+    environment: UAT              # ← approval gate configured here in GitHub settings
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ needs.build.outputs.version }}
+          path: ./dist/
+
+      - name: Deploy to UAT
+        run: |
+          echo "Deploying version ${{ needs.build.outputs.version }} to UAT"
+          # ./scripts/deploy.sh uat ${{ needs.build.outputs.version }}
+
+      - name: Run UAT regression tests
+        run: |
+          echo "Running regression suite on UAT"
+          # ./scripts/regression-tests.sh
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # 5. DEPLOY TO PROD — requires approval + prevent self-review recommended
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → PROD
+    needs: deploy-uat
+    runs-on: [self-hosted, prod]
+    environment: prod             # ← strictest approval gate; enable "prevent self-review"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}-${{ needs.build.outputs.version }}
+          path: ./dist/
+
+      - name: Pre-deployment backup
+        run: |
+          echo "Taking pre-deployment backup on PROD"
+          # ./scripts/backup.sh prod
+
+      - name: Deploy to PROD
+        run: |
+          echo "Deploying version ${{ needs.build.outputs.version }} to PROD"
+          # ./scripts/deploy.sh prod ${{ needs.build.outputs.version }}
+
+      - name: Post-deployment health check
+        run: |
+          echo "Running health check on PROD"
+          # curl -f http://prod-server/health || exit 1
+
+      - name: Tag release in Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "release-${{ needs.build.outputs.version }}"
+          git push origin "release-${{ needs.build.outputs.version }}"
+
+      - name: Notify on success
+        if: success()
+        run: |
+          echo "PROD deployment successful — version ${{ needs.build.outputs.version }}"
+          # curl -X POST ${{ secrets.TEAMS_WEBHOOK }} -d '{"text":"PROD deploy successful"}'
